@@ -10,7 +10,14 @@ require "rgeo/active_record"
 # autoload AbstractAdapter to avoid circular require and void context warnings
 module ActiveRecord
   module ConnectionAdapters
-    AbstractAdapter
+    begin
+      AbstractAdapter
+    rescue NameError
+      # Rails >= 6.1
+      require "active_record/connection_adapters"
+      require "active_record/errors"
+      AbstractAdapter
+    end
   end
 end
 

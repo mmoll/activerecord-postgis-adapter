@@ -1,8 +1,17 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "active_record/errors"
 
 class TasksTest < ActiveSupport::TestCase
+  DATABASE_EXISTS_ERROR =
+    if defined?(ActiveRecord::DatabaseAlreadyExists)
+      # Rails 6.1
+      ActiveRecord::DatabaseAlreadyExists
+    else
+      # Rails 6.0
+      ActiveRecord::Tasks::DatabaseAlreadyExists
+    end
   def test_create_database_from_extension_in_public_schema
     drop_db_if_exists
     ActiveRecord::Tasks::DatabaseTasks.create(new_connection)
@@ -11,8 +20,15 @@ class TasksTest < ActiveSupport::TestCase
 
   def test_create_database_from_extension_in_separate_schema
     drop_db_if_exists
-    configuration = new_connection.merge("postgis_schema" => "postgis")
-    ActiveRecord::Tasks::DatabaseTasks.create(configuration)
+    separate_schema_config =
+      if ActiveRecord::VERSION::MAJOR == 6 && ActiveRecord::VERSION::MINOR >= 1
+        db_config = new_connection
+        configuration = db_config.configuration_hash.merge("postgis_schema" => "postgis")
+        ActiveRecord::DatabaseConfigurations::HashConfig.new(db_config.env_name, name, configuration)
+      else
+        new_connection.merge("postgis_schema" => "postgis")
+      end
+    ActiveRecord::Tasks::DatabaseTasks.create(separate_schema_config)
     refute_empty connection.select_values("SELECT * from postgis.spatial_ref_sys")
   end
 
@@ -128,9 +144,14 @@ class TasksTest < ActiveSupport::TestCase
   private
 
   def new_connection
-    ActiveRecord::Base.test_connection_hash.merge("database" => "postgis_tasks_test")
+    conn_config = ActiveRecord::Base.test_connection_hash.merge("database" => "postgis_tasks_test")
+    if ActiveRecord::VERSION::MAJOR == 6 && ActiveRecord::VERSION::MINOR >= 1
+      ActiveRecord::DatabaseConfigurations::HashConfig.new("test", "spec_name", conn_config)
+    else
+      conn_config
+    end
   end
-  
+
   def connection
     ActiveRecord::Base.connection
   end
@@ -144,13 +165,13 @@ class TasksTest < ActiveSupport::TestCase
     FileUtils.mkdir_p(File.dirname(tmp_sql_filename))
     drop_db_if_exists
     ActiveRecord::ConnectionAdapters::PostGIS::PostGISDatabaseTasks.new(new_connection).create
-  rescue ActiveRecord::Tasks::DatabaseAlreadyExists
+  rescue DATABASE_EXISTS_ERROR
     # ignore
   end
 
   def drop_db_if_exists
     ActiveRecord::ConnectionAdapters::PostGIS::PostGISDatabaseTasks.new(new_connection).drop
-  rescue ActiveRecord::Tasks::DatabaseAlreadyExists
+  rescue DATABASE_EXISTS_ERROR
     # ignore
   end
 end

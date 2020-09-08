@@ -14,7 +14,7 @@ module ActiveRecord  # :nodoc:
           if extension_names
             setup_gis_from_extension
           end
-          establish_connection(configuration)
+          establish_connection(db_config)
         end
 
         # Override to set the database owner and call setup_gis
@@ -22,7 +22,11 @@ module ActiveRecord  # :nodoc:
           establish_master_connection unless master_established
           extra_configs = { "encoding" => encoding }
           extra_configs["owner"] = username if has_su?
-          connection.create_database(configuration["database"], configuration.merge(extra_configs))
+          if rails_gte_61?
+            connection.create_database(db_config.database, configuration_hash.merge(extra_configs))
+          else
+            connection.create_database(configuration["database"], configuration.merge(extra_configs))
+          end
           setup_gis
         rescue ::ActiveRecord::StatementInvalid => error
           if /database .* already exists/ === error.message
@@ -36,24 +40,46 @@ module ActiveRecord  # :nodoc:
 
         # Override to use su_username and su_password
         def establish_master_connection
-          establish_connection(configuration.merge(
-            "database"           => "postgres",
-            "password"           => su_password,
-            "schema_search_path" => "public",
-            "username"           => su_username
-          ))
+          if rails_gte_61?
+            new_config_hash = db_config.configuration_hash.merge(
+              "database"           => "postgres",
+              "password"           => su_password,
+              "schema_search_path" => "public",
+              "username"           => su_username
+            )
+            new_db_config = ActiveRecord::DatabaseConfigurations::HashConfig.new(db_config.env_name, db_config.name, new_config_hash)
+            establish_connection(new_db_config)
+          else
+            establish_connection(configuration.merge(
+              "database"           => "postgres",
+              "password"           => su_password,
+              "schema_search_path" => "public",
+              "username"           => su_username
+            ))
+          end
         end
 
         def establish_su_connection
-          establish_connection(configuration.merge(
-            "password"           => su_password,
-            "schema_search_path" => "public",
-            "username"           => su_username
-          ))
+          if rails_gte_61?
+            new_config_hash = db_config.configuration_hash.merge(
+              "password"           => su_password,
+              "schema_search_path" => "public",
+              "username"           => su_username
+            )
+            new_db_config = ActiveRecord::DatabaseConfigurations::HashConfig.new(db_config.env_name, db_config.name, new_config_hash)
+            establish_connection(new_db_config)
+          else
+            establish_connection(configuration.merge(
+              "database"           => "postgres",
+              "password"           => su_password,
+              "schema_search_path" => "public",
+              "username"           => su_username
+            ))
+          end
         end
 
         def username
-          @username ||= configuration["username"]
+          @username ||= configuration_hash[:username]
         end
 
         def quoted_username
@@ -61,29 +87,29 @@ module ActiveRecord  # :nodoc:
         end
 
         def password
-          @password ||= configuration["password"]
+          @password ||= configuration_hash[:password]
         end
 
         def su_username
-          @su_username ||= configuration["su_username"] || username
+          @su_username ||= configuration_hash[:su_username] || username
         end
 
         def su_password
-          @su_password ||= configuration["su_password"] || password
+          @su_password ||= configuration_hash[:su_password] || password
         end
 
         def has_su?
-          @has_su = configuration.include?("su_username") unless defined?(@has_su)
+          @has_su = configuration_hash.include?(:su_username) unless defined?(@has_su)
           @has_su
         end
 
         def search_path
-          @search_path ||= configuration["schema_search_path"].to_s.strip.split(",").map(&:strip)
+          @search_path ||= configuration_hash[:schema_search_path].to_s.strip.split(",").map(&:strip)
         end
 
         def extension_names
           @extension_names ||= begin
-            extensions = configuration["postgis_extension"]
+            extensions = configuration_hash[:postgis_extension]
             case extensions
             when ::String
               extensions.split(",")
@@ -96,11 +122,12 @@ module ActiveRecord  # :nodoc:
         end
 
         def ensure_installation_configs
-          if configuration["setup"] == "default" && !configuration["postgis_extension"]
+          if configuration_hash[:setup] == "default" && !configuration_hash[:postgis_extension]
             share_dir = `pg_config --sharedir`.strip rescue "/usr/share"
             control_file = ::File.expand_path("extension/postgis.control", share_dir)
             if ::File.readable?(control_file)
-              configuration["postgis_extension"] = "postgis"
+              # FIXME: Can't modify frozen hash
+              # configuration_hash[:postgis_extension] = "postgis"
             end
           end
         end
@@ -113,7 +140,7 @@ module ActiveRecord  # :nodoc:
               end
               connection.execute("CREATE EXTENSION IF NOT EXISTS #{extname} SCHEMA topology")
             else
-              if (postgis_schema = configuration["postgis_schema"])
+              if (postgis_schema = configuration_hash[:postgis_schema])
                 schema_clause = "WITH SCHEMA #{postgis_schema}"
                 unless schema_exists?(postgis_schema)
                   connection.execute("CREATE SCHEMA #{postgis_schema}")
@@ -132,6 +159,20 @@ module ActiveRecord  # :nodoc:
           connection.execute(
             "SELECT schema_name FROM information_schema.schemata WHERE schema_name = '#{schema_name}'"
           ).any?
+        end
+
+        # Keep the configuration_hash method backwards compatible with rails < 6.1
+        def configuration_hash
+          # Rails 6.1
+          super
+        rescue
+          # Rails < 6.1
+          configuration
+        end
+
+        # Greater than or equal to Rails 6.1
+        def rails_gte_61?
+          ActiveRecord::VERSION::MAJOR == 6 && ActiveRecord::VERSION::MINOR >= 1
         end
       end
 
